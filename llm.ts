@@ -62,7 +62,12 @@ function getOpenAI(): OpenAI {
       "OCP_BASE_URL not set — cannot route to OCP proxy. Set LLM_PROVIDER=anthropic to fall back to direct Anthropic API.",
     );
   }
-  _oai = new OpenAI({ apiKey, baseURL });
+  // OCP's gateway 403s the OpenAI SDK's default `User-Agent: OpenAI/JS …`
+  // header ("Your request was blocked"). Set a non-OpenAI UA so the
+  // subscription proxy accepts the request. Callers can override via the
+  // LLM_USER_AGENT env if they want their own identity in the logs.
+  const userAgent = process.env.LLM_USER_AGENT ?? "brick-canonical-llm/0.1";
+  _oai = new OpenAI({ apiKey, baseURL, defaultHeaders: { "User-Agent": userAgent } });
   return _oai;
 }
 
