@@ -1,0 +1,7 @@
+# Dependencies for brick_llm.py — the Python twin of llm.ts.
+# Install: pip install -r requirements.txt
+#
+# Both SDKs are imported lazily inside the call functions, so the pure-function
+# helpers (and test_brick_llm.py) run without these installed.
+openai>=1.40
+anthropic>=0.39
