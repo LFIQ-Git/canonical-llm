@@ -1,7 +1,7 @@
 {
   "name": "@lfiq/canonical-llm",
-  "version": "0.1.0",
-  "description": "Canonical LLM router for the BRICK app family — OCP→Anthropic provider abstraction with tier-based model selection and circuit-breaker fallback. Imported by every BRICK app's `lib/llm.ts`.",
+  "version": "0.1.1",
+  "description": "Canonical LLM router for the BRICK app family \u2014 OCP\u2192Anthropic provider abstraction with tier-based model selection and circuit-breaker fallback. Imported by every BRICK app's `lib/llm.ts`.",
   "type": "module",
   "main": "./llm.ts",
   "types": "./llm.ts",
@@ -13,12 +13,20 @@
     "README.md"
   ],
   "peerDependencies": {
-    "openai": "^4.0.0",
-    "@anthropic-ai/sdk": "^0.30.0"
+    "openai": ">=4.0.0",
+    "@anthropic-ai/sdk": ">=0.30.0"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/LFIQ-Git/canonical-llm.git"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "peerDependenciesMeta": {
+    "openai": {
+      "optional": true
+    },
+    "@anthropic-ai/sdk": {
+      "optional": true
+    }
+  }
 }
