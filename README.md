@@ -72,3 +72,38 @@ API: `chat()` / `chat_with_retry()` return text; `chat_detailed()` /
 `LLM_MODEL_BALANCED` / `LLM_MODEL_DEEP` override tier model IDs.
 
 Architecture + rollout tracker: `02-brick.intel/docs/llm-architecture.md`.
+
+## Layer-0 (this package) vs Layer-1 (per-app direct SDK)
+
+This router is **text in → text out**. It abstracts provider + tier + fallback
+for the common case (`chat`, `chatDetailed`, `chatWithRetry`). It does **not**
+model:
+
+- multi-turn tool-use loops
+- structured-output via Anthropic tool schemas
+- document/PDF content blocks
+- Anthropic beta APIs (`client.beta.*`: Files API, code_execution, …)
+
+Apps that need those reach for the vendor SDK directly. That's a **Layer-1
+exception**, not drift. Mark such files with a comment:
+
+```ts
+// Layer-1 exception: <feature> — the text-only canonical router cannot host
+// this. Direct SDK import is intentional.
+```
+
+Even Layer-1 sites should import `MODEL_TIERS` from this package so a global
+tier bump still reaches them. The hardcoded model strings are the drift to
+avoid — the direct SDK call itself is fine.
+
+### Current Layer-1 sites (BRICK family, 2026-06-11)
+
+- `02-brick.runner/lib/agent/loop.ts` — multi-turn tool-use agent loop
+- `02-brick.runner/lib/lease-abstract-extractor.ts` — tool-use structured output with PDF document blocks
+- `02-brick.runner/app/api/excel-audit/route.ts` — beta Files API + code_execution
+- `02-brick.runner/lib/fs-review-openai.ts` — OpenAI `gpt-4o-mini` structured outputs (different provider, deliberate)
+
+Closing these would require either (a) extending this package with a
+`chatWithTools` API that translates between OpenAI and Anthropic tool-use
+shapes, or (b) OCP exposing an Anthropic-shape passthrough endpoint. Tracked
+separately.
