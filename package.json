@@ -1,7 +1,7 @@
 {
   "name": "@lfiq/canonical-llm",
-  "version": "0.1.1",
-  "description": "Canonical LLM router for the BRICK app family \u2014 OCP\u2192Anthropic provider abstraction with tier-based model selection and circuit-breaker fallback. Imported by every BRICK app's `lib/llm.ts`.",
+  "version": "0.2.0",
+  "description": "Canonical LLM router for the BRICK app family \u2014 OCP\u2192ocp-fallback\u2192Anthropic provider chain with tier-based model selection and per-leg circuit breakers. Imported by every BRICK app's `lib/llm.ts`.",
   "type": "module",
   "main": "./llm.ts",
   "types": "./llm.ts",

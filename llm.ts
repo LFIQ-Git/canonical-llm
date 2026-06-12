@@ -7,10 +7,15 @@
  * and re-sync. Architecture + rollout tracker: 02-brick.intel/docs/llm-architecture.md.
  *
  * Providers (resolved + failed over automatically):
- *   - "ocp"       — Win-PC OCP proxy, subscription-backed, $0/call. Primary
- *                   when OCP_BASE_URL is set and LLM_PROVIDER !== "anthropic".
- *   - "anthropic" — Anthropic SDK directly with ANTHROPIC_API_KEY. Fallback,
- *                   and forced when LLM_PROVIDER=anthropic.
+ *   - "ocp"          — Win-PC OCP proxy, subscription-backed, $0/call. Primary
+ *                      when OCP_BASE_URL is set and LLM_PROVIDER !== "anthropic".
+ *   - "ocp-fallback" — hosted OpenAI-shape proxy on Vercel that translates to
+ *                      paid Anthropic API. Intermediate failover for the OCP
+ *                      path when OCP_FALLBACK_BASE_URL + OCP_FALLBACK_API_KEY
+ *                      are set. Kills the Win-PC single-point-of-failure.
+ *   - "anthropic"    — Anthropic SDK directly with ANTHROPIC_API_KEY. Last
+ *                      resort on the OCP chain, and the only leg when
+ *                      LLM_PROVIDER=anthropic.
  *
  * Four things every app gets for free here:
  *   1. Automatic failover — if OCP errors transiently, the call retries on
@@ -30,7 +35,7 @@
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 
-export type Provider = "ocp" | "anthropic";
+export type Provider = "ocp" | "ocp-fallback" | "anthropic";
 export type ModelTier = "fast" | "balanced" | "deep";
 
 /** Tier → model ID. One place to bump models family-wide. Keep IDs inside
@@ -51,6 +56,7 @@ export function getProvider(): Provider {
 }
 
 let _oai: OpenAI | null = null;
+let _oaiFallback: OpenAI | null = null;
 let _anthropic: Anthropic | null = null;
 
 function getOpenAI(): OpenAI {
@@ -69,6 +75,29 @@ function getOpenAI(): OpenAI {
   const userAgent = process.env.LLM_USER_AGENT ?? "brick-canonical-llm/0.1";
   _oai = new OpenAI({ apiKey, baseURL, defaultHeaders: { "User-Agent": userAgent } });
   return _oai;
+}
+
+function ocpFallbackConfigured(): boolean {
+  return Boolean(process.env.OCP_FALLBACK_BASE_URL && process.env.OCP_FALLBACK_API_KEY);
+}
+
+function getOpenAIFallback(): OpenAI {
+  if (_oaiFallback) return _oaiFallback;
+  const apiKey = process.env.OCP_FALLBACK_API_KEY;
+  const baseURL = process.env.OCP_FALLBACK_BASE_URL;
+  if (!apiKey || !baseURL) {
+    throw new Error(
+      "OCP_FALLBACK_BASE_URL / OCP_FALLBACK_API_KEY not set — ocp-fallback unavailable.",
+    );
+  }
+  const appName = process.env.LLM_APP_NAME ?? "unknown";
+  _oaiFallback = new OpenAI({
+    apiKey,
+    baseURL,
+    // X-App-Name lets the fallback proxy log which app a call came from.
+    defaultHeaders: { "X-App-Name": appName },
+  });
+  return _oaiFallback;
 }
 
 function getAnthropic(): Anthropic {
@@ -137,28 +166,36 @@ function logCall(rec: {
   }
 }
 
-// ── circuit breaker — skip a flapping OCP proxy for a cooldown ───────────
+// ── circuit breakers — skip a flapping proxy for a cooldown ──────────────
+// Independent breakers per leg of the OCP chain so a wedged Win-PC doesn't
+// trip the hosted fallback and vice versa.
 const BREAKER_THRESHOLD = 3;
 const BREAKER_COOLDOWN_MS = 60_000;
-let _ocpFailures = 0;
-let _ocpOpenedAt = 0;
 
-function ocpBreakerOpen(): boolean {
-  if (_ocpFailures < BREAKER_THRESHOLD) return false;
-  if (Date.now() - _ocpOpenedAt > BREAKER_COOLDOWN_MS) {
-    _ocpFailures = 0; // cooldown elapsed — half-open, allow a probe
-    return false;
-  }
-  return true;
+function makeBreaker() {
+  let failures = 0;
+  let openedAt = 0;
+  return {
+    open(): boolean {
+      if (failures < BREAKER_THRESHOLD) return false;
+      if (Date.now() - openedAt > BREAKER_COOLDOWN_MS) {
+        failures = 0; // cooldown elapsed — half-open, allow a probe
+        return false;
+      }
+      return true;
+    },
+    note(ok: boolean): void {
+      if (ok) {
+        failures = 0;
+      } else {
+        failures += 1;
+        if (failures >= BREAKER_THRESHOLD) openedAt = Date.now();
+      }
+    },
+  };
 }
-function noteOcpResult(ok: boolean): void {
-  if (ok) {
-    _ocpFailures = 0;
-  } else {
-    _ocpFailures += 1;
-    if (_ocpFailures >= BREAKER_THRESHOLD) _ocpOpenedAt = Date.now();
-  }
-}
+const _ocpBreaker = makeBreaker();
+const _ocpFallbackBreaker = makeBreaker();
 
 function resolveModel(args: ChatArgs): { model: string; tier?: ModelTier } {
   if (args.model) return { model: args.model, tier: args.tier };
@@ -173,15 +210,15 @@ interface ProviderOutput {
   raw: unknown;
 }
 
-async function callOcp(
+async function callOpenAIShape(
+  client: OpenAI,
   system: string,
   messages: ChatMessage[],
   model: string,
   maxTokens: number,
   temperature?: number,
 ): Promise<ProviderOutput> {
-  const oai = getOpenAI();
-  const r = await oai.chat.completions.create({
+  const r = await client.chat.completions.create({
     model,
     max_tokens: maxTokens,
     ...(temperature !== undefined ? { temperature } : {}),
@@ -199,6 +236,12 @@ async function callOcp(
     raw: r,
   };
 }
+
+const callOcp = (s: string, m: ChatMessage[], model: string, mt: number, t?: number) =>
+  callOpenAIShape(getOpenAI(), s, m, model, mt, t);
+
+const callOcpFallback = (s: string, m: ChatMessage[], model: string, mt: number, t?: number) =>
+  callOpenAIShape(getOpenAIFallback(), s, m, model, mt, t);
 
 async function callAnthropic(
   system: string,
@@ -232,46 +275,66 @@ async function callAnthropic(
  * Core routing + failover. Returns the rich result. `chat()` and
  * `chatDetailed()` are thin wrappers over this.
  *
- * Routing: primary provider per `getProvider()`. If the primary is OCP and it
- * errors transiently — or its circuit breaker is open — the call fails over
- * to Anthropic when ANTHROPIC_API_KEY is set. Anthropic-primary does not fail
- * over to OCP (it is the more reliable leg).
+ * Routing chain when primary === "ocp" (Win-PC reachable):
+ *   1. OCP (Win-PC, $0)               — skip if breaker open
+ *   2. ocp-fallback (hosted, paid)    — skip if not configured or breaker open
+ *   3. Anthropic direct SDK           — skip if ANTHROPIC_API_KEY unset
+ *
+ * Each step's transient failure is logged + advances to the next. When primary
+ * is "anthropic" (forced or no OCP_BASE_URL), only step 3 runs; the OCP chain
+ * is opt-in and Anthropic-primary callers don't pay the latency of probing it.
  */
 async function runChat(args: ChatArgs): Promise<ChatResult> {
   const { model, tier } = resolveModel(args);
   const maxTokens = args.maxTokens ?? 8192;
   const primary = getProvider();
   const anthropicAvailable = Boolean(process.env.ANTHROPIC_API_KEY);
-  const started = Date.now();
+  const fallbackAvailable = ocpFallbackConfigured();
 
-  // OCP primary (unless its breaker is open) → fail over to Anthropic.
-  if (primary === "ocp" && !ocpBreakerOpen()) {
+  // ── Leg 1: OCP (Win-PC) ────────────────────────────────────────────────
+  if (primary === "ocp" && !_ocpBreaker.open()) {
+    const t = Date.now();
     try {
       const out = await callOcp(args.system, args.messages, model, maxTokens, args.temperature);
-      noteOcpResult(true);
-      logCall({ provider: "ocp", model, tier, latencyMs: Date.now() - started, ok: true });
+      _ocpBreaker.note(true);
+      logCall({ provider: "ocp", model, tier, latencyMs: Date.now() - t, ok: true });
       return { ...out, provider: "ocp" };
     } catch (e) {
-      noteOcpResult(false);
+      _ocpBreaker.note(false);
       const err = e instanceof Error ? e.message : String(e);
-      if (!anthropicAvailable) {
-        logCall({ provider: "ocp", model, tier, latencyMs: Date.now() - started, ok: false, err });
-        throw e;
-      }
-      // fall through to Anthropic failover
-      logCall({ provider: "ocp", model, tier, latencyMs: Date.now() - started, ok: false, err });
+      logCall({ provider: "ocp", model, tier, latencyMs: Date.now() - t, ok: false, err });
+      if (!fallbackAvailable && !anthropicAvailable) throw e;
+      // fall through
     }
   }
 
+  // ── Leg 2: ocp-fallback (hosted) ───────────────────────────────────────
+  if (primary === "ocp" && fallbackAvailable && !_ocpFallbackBreaker.open()) {
+    const t = Date.now();
+    try {
+      const out = await callOcpFallback(args.system, args.messages, model, maxTokens, args.temperature);
+      _ocpFallbackBreaker.note(true);
+      logCall({ provider: "ocp-fallback", model, tier, latencyMs: Date.now() - t, ok: true, failedOver: true });
+      return { ...out, provider: "ocp-fallback" };
+    } catch (e) {
+      _ocpFallbackBreaker.note(false);
+      const err = e instanceof Error ? e.message : String(e);
+      logCall({ provider: "ocp-fallback", model, tier, latencyMs: Date.now() - t, ok: false, failedOver: true, err });
+      if (!anthropicAvailable) throw e;
+      // fall through
+    }
+  }
+
+  // ── Leg 3: Anthropic direct SDK ────────────────────────────────────────
   const fellOver = primary === "ocp";
-  const aStarted = Date.now();
+  const t = Date.now();
   try {
     const out = await callAnthropic(args.system, args.messages, model, maxTokens, args.temperature);
-    logCall({ provider: "anthropic", model, tier, latencyMs: Date.now() - aStarted, ok: true, failedOver: fellOver });
+    logCall({ provider: "anthropic", model, tier, latencyMs: Date.now() - t, ok: true, failedOver: fellOver });
     return { ...out, provider: "anthropic" };
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);
-    logCall({ provider: "anthropic", model, tier, latencyMs: Date.now() - aStarted, ok: false, failedOver: fellOver, err });
+    logCall({ provider: "anthropic", model, tier, latencyMs: Date.now() - t, ok: false, failedOver: fellOver, err });
     throw e;
   }
 }
