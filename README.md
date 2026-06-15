@@ -67,7 +67,10 @@ API: `chat()` / `chat_with_retry()` return text; `chat_detailed()` /
 
 ## Env contract
 
-`OCP_BASE_URL`, `OCP_API_KEY` — OCP proxy. `ANTHROPIC_API_KEY` — fallback.
+`OCP_BASE_URL`, `OCP_API_KEY` — OCP proxy. `OCP_CF_ACCESS_CLIENT_ID`,
+`OCP_CF_ACCESS_CLIENT_SECRET` — Cloudflare Access service token for the OCP
+gateway (without it Access returns an SSO login page, not JSON).
+`ANTHROPIC_API_KEY` — fallback.
 `LLM_PROVIDER=anthropic` forces the direct provider. `LLM_MODEL_FAST` /
 `LLM_MODEL_BALANCED` / `LLM_MODEL_DEEP` override tier model IDs.
 

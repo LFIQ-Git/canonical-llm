@@ -73,7 +73,18 @@ function getOpenAI(): OpenAI {
   // subscription proxy accepts the request. Callers can override via the
   // LLM_USER_AGENT env if they want their own identity in the logs.
   const userAgent = process.env.LLM_USER_AGENT ?? "brick-canonical-llm/0.1";
-  _oai = new OpenAI({ apiKey, baseURL, defaultHeaders: { "User-Agent": userAgent } });
+  // Cloudflare Access fronts ocp.lfiq.app: without a service-token pair Access
+  // 302s the request to an SSO login page and the SDK receives HTML, not JSON
+  // (SyntaxError: Unexpected token '<', "<!DOCTYPE "...). Send the
+  // CF-Access-Client-Id/Secret service-token headers when configured.
+  const defaultHeaders: Record<string, string> = { "User-Agent": userAgent };
+  const cfId = process.env.OCP_CF_ACCESS_CLIENT_ID;
+  const cfSecret = process.env.OCP_CF_ACCESS_CLIENT_SECRET;
+  if (cfId && cfSecret) {
+    defaultHeaders["CF-Access-Client-Id"] = cfId;
+    defaultHeaders["CF-Access-Client-Secret"] = cfSecret;
+  }
+  _oai = new OpenAI({ apiKey, baseURL, defaultHeaders });
   return _oai;
 }
 
