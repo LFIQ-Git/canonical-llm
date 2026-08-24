@@ -147,6 +147,9 @@ export interface ChatArgs {
 export interface ChatUsage {
   input_tokens?: number;
   output_tokens?: number;
+  /** Anthropic path only — tokens written to / read from the prompt cache. */
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
 }
 
 /** Rich result — text plus the metadata callers occasionally need. */
@@ -168,6 +171,8 @@ function logCall(rec: {
   ok: boolean;
   failedOver?: boolean;
   err?: string;
+  cacheWrite?: number;
+  cacheRead?: number;
 }): void {
   // One structured line per call — cheap to grep / ship to a log drain later.
   try {
@@ -277,6 +282,8 @@ async function callAnthropic(
     usage: {
       input_tokens: r.usage?.input_tokens,
       output_tokens: r.usage?.output_tokens,
+      cache_creation_input_tokens: r.usage?.cache_creation_input_tokens ?? undefined,
+      cache_read_input_tokens: r.usage?.cache_read_input_tokens ?? undefined,
     },
     raw: r,
   };
@@ -341,7 +348,16 @@ async function runChat(args: ChatArgs): Promise<ChatResult> {
   const t = Date.now();
   try {
     const out = await callAnthropic(args.system, args.messages, model, maxTokens, args.temperature);
-    logCall({ provider: "anthropic", model, tier, latencyMs: Date.now() - t, ok: true, failedOver: fellOver });
+    logCall({
+      provider: "anthropic",
+      model,
+      tier,
+      latencyMs: Date.now() - t,
+      ok: true,
+      failedOver: fellOver,
+      cacheWrite: out.usage.cache_creation_input_tokens,
+      cacheRead: out.usage.cache_read_input_tokens,
+    });
     return { ...out, provider: "anthropic" };
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);

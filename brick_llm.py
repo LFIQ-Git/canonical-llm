@@ -164,6 +164,9 @@ class ChatUsage(TypedDict, total=False):
 
     input_tokens: int
     output_tokens: int
+    # Anthropic path only — tokens written to / read from the prompt cache.
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
 
 
 @dataclass
@@ -187,6 +190,8 @@ def _log_call(
     ok: bool,
     failed_over: Optional[bool] = None,
     err: Optional[str] = None,
+    cache_write: Optional[int] = None,
+    cache_read: Optional[int] = None,
 ) -> None:
     """Emit one structured ``llm.call`` line per call — cheap to grep / ship
     to a log drain later. Logging must never throw.
@@ -213,6 +218,10 @@ def _log_call(
             rec["failedOver"] = failed_over
         if err is not None:
             rec["err"] = err
+        if cache_write is not None:
+            rec["cacheWrite"] = cache_write
+        if cache_read is not None:
+            rec["cacheRead"] = cache_read
         rec["ts"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + (
             ".%03dZ" % (int(time.time() * 1000) % 1000)
         )
@@ -345,6 +354,10 @@ def _call_anthropic(
             usage["input_tokens"] = r.usage.input_tokens
         if getattr(r.usage, "output_tokens", None) is not None:
             usage["output_tokens"] = r.usage.output_tokens
+        if getattr(r.usage, "cache_creation_input_tokens", None) is not None:
+            usage["cache_creation_input_tokens"] = r.usage.cache_creation_input_tokens
+        if getattr(r.usage, "cache_read_input_tokens", None) is not None:
+            usage["cache_read_input_tokens"] = r.usage.cache_read_input_tokens
     return _ProviderOutput(text=text, usage=usage, raw=r)
 
 
@@ -403,6 +416,8 @@ def _run_chat(args: ChatArgs) -> ChatResult:
             int(_now_ms() - a_started),
             ok=True,
             failed_over=fell_over,
+            cache_write=out.usage.get("cache_creation_input_tokens"),
+            cache_read=out.usage.get("cache_read_input_tokens"),
         )
         return ChatResult(
             text=out.text, usage=out.usage, raw=out.raw, provider="anthropic"
