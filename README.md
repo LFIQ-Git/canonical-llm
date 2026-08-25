@@ -1,12 +1,12 @@
 # canonical-llm
 
 **Canonical BRICK LLM router (Layer 0).** Single source of truth for model
-routing across the BRICK family.
-
-`llm.ts` here is the master copy. Each app keeps a verbatim copy at its own
-`lib/llm.ts`, synced from this file — the same copy-from-canonical pattern as
-`canonical-app-family-menu/`. **Never edit a per-app copy.** Edit this file,
-then re-sync every consumer.
+routing across the BRICK family, distributed as the npm package
+`@lfiq/canonical-llm` from this repo, pinned by commit SHA in each consumer's
+`package.json`. Each consumer's `lib/llm.ts` is a one-line re-export shim
+(`export * from "@lfiq/canonical-llm"`). **To change router behavior: edit this
+repo, push, then bump the SHA pin in every consumer.** Never edit a per-app
+shim.
 
 ## What it provides
 
@@ -14,99 +14,69 @@ then re-sync every consumer.
 - `chatDetailed()` / `chatDetailedWithRetry()` — same call, richer return
   (`{ text, usage, raw, provider }`) for callers that need token counts, the
   raw provider response, or the provider that actually answered after failover.
-- Provider routing: OCP proxy (subscription, $0/call) primary → Anthropic API
-  fallback, with **automatic failover** and a circuit breaker.
+- Provider chain with per-leg circuit breakers and automatic failover:
+  **OCP (Win-PC, subscription, $0/call) → ocp-fallback (hosted, paid) →
+  Anthropic direct SDK**. Forcing `LLM_PROVIDER=anthropic` runs leg 3 only.
+- **Prompt caching** — the Anthropic leg marks the system block
+  `cache_control: ephemeral`; repeated system prefixes over the model's
+  cacheable minimum bill at ~10% of input price.
 - **Model tiers** — `fast` / `balanced` / `deep` via `MODEL_TIERS`; callers
   pass `tier` instead of pinning a model ID.
-- **Observability** — one `llm.call` structured log line per call.
+- **Observability** — one `llm.call` structured log line per call. Since
+  v0.3.0 the Anthropic leg also logs `cacheWrite` / `cacheRead` (prompt-cache
+  token counts), and `ChatUsage` carries `cache_creation_input_tokens` /
+  `cache_read_input_tokens`.
 
-## Consumers (sync targets)
+## Consumers (SHA pins to bump on release)
 
-- `04-mosser.apps/leasing` (command.leasing) — `lib/llm.ts`
-- `02-brick.command.collect` — `lib/llm.ts`
-- `02-brick.command.repair` — `lib/llm.ts` (when it gains an AI surface)
-- `02-brick.intel` — `lib/llm.ts`
-- `02-brick.keystone` — `lib/llm.ts`
-- `02-brick.runner` — `lib/llm.ts`
+| App | Shim | Pin location |
+|---|---|---|
+| `02-brick.intel` | `app/lib/llm.ts` | own `package.json` + `package-lock.json` |
+| `02-brick.keystone` | `lib/llm.ts` | own `package.json` + `package-lock.json` |
+| `02-brick.command` `apps/collect` | `lib/llm.ts` | workspace `package.json`; lock entries live in **command's root `package-lock.json`** |
+| `02-brick.command` `apps/leasing` | `lib/llm.ts` | same — command root lockfile |
+| `02-brick.command` `apps/web` | `lib/llm.ts` | same — command root lockfile |
 
-Each consumer needs `openai` and `@anthropic-ai/sdk` in its dependencies.
-No consumer may import those SDKs outside its `lib/llm.ts`.
+After bumping the three command workspace pins, run
+`npm install --package-lock-only` at the **command repo root** (not in the
+workspace dirs) so the single root lockfile re-resolves.
+
+No consumer may import `openai` / `@anthropic-ai/sdk` outside its shim.
 
 ## CI guard — `check-llm-imports.mjs`
 
-`check-llm-imports.mjs` here is the master copy of the CI guard that enforces
-the rule above. Each app keeps a verbatim copy at `scripts/check-llm-imports.mjs`
-(synced from this file) and runs it in CI via `npm run check:llm-imports` on
-every push/PR. It scans `app/`/`lib/`/etc. for `openai` / `@anthropic-ai/sdk`
-imports and fails the build if any offending file is outside the allowlist —
-the app's Layer-0 router (`lib/llm.ts`, or `app/lib/llm.ts` in brick.intel),
-plus files carrying a `Layer-1 exception:` marker comment (used by runner's 5
-documented tool-use / JSON-mode / agent-loop files). Pure Node built-ins, no
-deps. Edit the master here, then re-sync every consumer.
+The master copy of the CI guard lives in the vault at
+`02-brick.apps/02-brick.hub/canonical-llm/check-llm-imports.mjs` (it is not
+part of this package). Each app keeps a verbatim copy at
+`scripts/check-llm-imports.mjs` and runs it in CI on every push/PR. It fails
+the build on any `openai` / `@anthropic-ai/sdk` import outside the app's
+Layer-0 shim, except files carrying a `Layer-1 exception:` marker comment.
 
 ## Python twin — `brick_llm.py`
 
-`brick_llm.py` is the Python port of `llm.ts` — a faithful behavioral twin for
-the family's Python work (ETL jobs, e.g. the GDM extractor Cloud Run job).
-It mirrors `llm.ts` feature-for-feature: same providers and `get_provider()`
-resolution, same `MODEL_TIERS` / `DEFAULT_LLM_MODEL`, same OCP→Anthropic
-automatic failover and circuit breaker (`BREAKER_THRESHOLD=3`,
-`BREAKER_COOLDOWN_MS=60000`), same retry policy (3 attempts, `[500,1500,4000]`
-ms backoff), and the same one-line `llm.call` structured log per call.
+`brick_llm.py` (in this repo) is the Python port of `llm.ts` for the family's
+Python work — same providers, tiers, retry policy, circuit breaker, cache
+counters, and `llm.call` log shape. It currently lacks the ocp-fallback leg
+(OCP → Anthropic only). Tests: `python3 test_brick_llm.py` — pure functions,
+no network, no SDKs needed. When `llm.ts` changes, change `brick_llm.py` with
+it.
 
-API: `chat()` / `chat_with_retry()` return text; `chat_detailed()` /
-`chat_detailed_with_retry()` return a `ChatResult` (`text`, `usage`, `raw`,
-`provider`). When `llm.ts` changes, change `brick_llm.py` with it.
+## Vault mirror
 
-- **Deps:** `openai` and `anthropic` Python SDKs — see `requirements.txt`
-  (`pip install -r requirements.txt`). Both are imported lazily inside the
-  call functions, so the pure helpers and the unit tests run without them.
-- **Tests:** `test_brick_llm.py` — pure-function unit tests (no network).
-  Run with `pytest`, or as a plain script: `python3 test_brick_llm.py`.
-- **Env contract:** identical to `llm.ts` (see below).
+`02-brick.apps/02-brick.hub/canonical-llm/` in the vault holds a reference
+mirror of `llm.ts` / `brick_llm.py` / `test_brick_llm.py` plus the CI-guard
+master. The mirror is for browsing and for the guard — **this repo is the
+source of truth**; re-sync the mirror after each release.
 
 ## Env contract
 
-`OCP_BASE_URL`, `OCP_API_KEY` — OCP proxy. `OCP_CF_ACCESS_CLIENT_ID`,
-`OCP_CF_ACCESS_CLIENT_SECRET` — Cloudflare Access service token for the OCP
-gateway (without it Access returns an SSO login page, not JSON).
-`ANTHROPIC_API_KEY` — fallback.
-`LLM_PROVIDER=anthropic` forces the direct provider. `LLM_MODEL_FAST` /
-`LLM_MODEL_BALANCED` / `LLM_MODEL_DEEP` override tier model IDs.
+`OCP_BASE_URL`, `OCP_API_KEY` — Win-PC OCP proxy;
+`OCP_CF_ACCESS_CLIENT_ID` / `OCP_CF_ACCESS_CLIENT_SECRET` — Cloudflare Access
+service token sent to the OCP gateway. `OCP_FALLBACK_BASE_URL`,
+`OCP_FALLBACK_API_KEY` — hosted fallback leg. `ANTHROPIC_API_KEY` — direct
+leg. `LLM_PROVIDER=anthropic` forces the direct leg. `LLM_MODEL_FAST` /
+`LLM_MODEL_BALANCED` / `LLM_MODEL_DEEP` override tier model IDs;
+`EXTRACTION_MODEL` overrides the default model. `LLM_APP_NAME` /
+`LLM_USER_AGENT` tag outbound requests.
 
 Architecture + rollout tracker: `02-brick.intel/docs/llm-architecture.md`.
-
-## Layer-0 (this package) vs Layer-1 (per-app direct SDK)
-
-This router is **text in → text out**. It abstracts provider + tier + fallback
-for the common case (`chat`, `chatDetailed`, `chatWithRetry`). It does **not**
-model:
-
-- multi-turn tool-use loops
-- structured-output via Anthropic tool schemas
-- document/PDF content blocks
-- Anthropic beta APIs (`client.beta.*`: Files API, code_execution, …)
-
-Apps that need those reach for the vendor SDK directly. That's a **Layer-1
-exception**, not drift. Mark such files with a comment:
-
-```ts
-// Layer-1 exception: <feature> — the text-only canonical router cannot host
-// this. Direct SDK import is intentional.
-```
-
-Even Layer-1 sites should import `MODEL_TIERS` from this package so a global
-tier bump still reaches them. The hardcoded model strings are the drift to
-avoid — the direct SDK call itself is fine.
-
-### Current Layer-1 sites (BRICK family, 2026-06-11)
-
-- `02-brick.runner/lib/agent/loop.ts` — multi-turn tool-use agent loop
-- `02-brick.runner/lib/lease-abstract-extractor.ts` — tool-use structured output with PDF document blocks
-- `02-brick.runner/app/api/excel-audit/route.ts` — beta Files API + code_execution
-- `02-brick.runner/lib/fs-review-openai.ts` — OpenAI `gpt-4o-mini` structured outputs (different provider, deliberate)
-
-Closing these would require either (a) extending this package with a
-`chatWithTools` API that translates between OpenAI and Anthropic tool-use
-shapes, or (b) OCP exposing an Anthropic-shape passthrough endpoint. Tracked
-separately.
