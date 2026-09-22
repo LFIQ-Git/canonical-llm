@@ -1,26 +1,30 @@
 {
   "name": "@lfiq/canonical-llm",
-  "version": "0.3.0",
-  "description": "Canonical LLM router for the BRICK app family \u2014 OCP\u2192ocp-fallback\u2192Anthropic provider chain with tier-based model selection and per-leg circuit breakers. Imported by every BRICK app's `lib/llm.ts`.",
+  "version": "0.4.0",
+  "description": "Canonical LLM router for the BRICK app family — OCP→ocp-fallback→Anthropic provider chain with tier-based model selection and per-leg circuit breakers. Imported by every BRICK app's `lib/llm.ts`.",
   "type": "module",
-  "main": "./llm.ts",
-  "types": "./llm.ts",
+  "main": "./dist/llm.js",
+  "types": "./dist/llm.d.ts",
   "exports": {
-    ".": "./llm.ts"
+    ".": {
+      "types": "./dist/llm.d.ts",
+      "default": "./dist/llm.js"
+    }
   },
   "files": [
+    "dist",
     "llm.ts",
     "README.md"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit",
+    "check:dist": "npm run build && test -z \"$(git status --porcelain -- dist)\""
+  },
   "peerDependencies": {
-    "openai": ">=4.0.0",
-    "@anthropic-ai/sdk": ">=0.30.0"
+    "@anthropic-ai/sdk": ">=0.30.0",
+    "openai": ">=4.0.0"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/LFIQ-Git/canonical-llm.git"
-  },
-  "license": "UNLICENSED",
   "peerDependenciesMeta": {
     "openai": {
       "optional": true
@@ -28,5 +32,16 @@
     "@anthropic-ai/sdk": {
       "optional": true
     }
-  }
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
+    "@types/node": "^26.6.2",
+    "openai": "^7.21.0",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LFIQ-Git/canonical-llm.git"
+  },
+  "license": "UNLICENSED"
 }

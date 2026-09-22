@@ -8,6 +8,21 @@ routing across the BRICK family, distributed as the npm package
 repo, push, then bump the SHA pin in every consumer.** Never edit a per-app
 shim.
 
+## Distribution — compiled JS in `dist/`
+
+Consumers import **compiled JavaScript**, not the TypeScript source. `main`,
+`types` and `exports` point at `dist/llm.js` / `dist/llm.d.ts`, which are
+**committed** to this repo so a git-dependency install needs no build step and
+no TypeScript toolchain (Vercel, Cloudflare Workers Builds and local `npm ci`
+all just copy files). Before 0.4.0 the package entry was the raw `llm.ts`,
+which made every consumer add the package to `transpilePackages` and broke
+Turbopack builds that forgot to ("Unknown module type"). That workaround is no
+longer needed.
+
+Release flow: edit `llm.ts` → `npm run build` → commit **source and `dist/`
+together** → push → bump the SHA pin in each consumer. CI runs
+`npm run check:dist` and fails the build if `dist/` does not match the source.
+
 ## What it provides
 
 - `chat()` / `chatWithRetry()` — single round-trip model calls, return text.
